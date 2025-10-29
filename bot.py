@@ -1,18 +1,21 @@
 import os
+import asyncio
+import threading
 import requests
-from aiogram import Bot, Dispatcher, types
-from aiogram.utils import executor
+from aiogram import Bot, Dispatcher, types, Router
+from aiogram.filters import Command
 from flask import Flask, request
 
-# Telegram token (Render Environment Variables dan olinadi)
+# --- Asosiy sozlamalar ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 API_URL = os.getenv("API_URL", "https://api-xtsc.onrender.com/download")
 API_KEY = os.getenv("API_KEY")
 
 bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher(bot)
+dp = Dispatcher()
+router = Router()
+dp.include_router(router)
 
-# Flask app (Render uchun jonli tutish)
 app = Flask(__name__)
 
 # --- FUNKSIYA: media yuklash ---
@@ -30,8 +33,8 @@ def download_media(url):
         return None
 
 
-# --- HANDLER: link yuborilgan ---
-@dp.message_handler(lambda msg: "instagram.com" in msg.text.lower() or "pinterest.com" in msg.text.lower())
+# --- HANDLER: Instagram yoki Pinterest link yuborilgan ---
+@router.message(lambda msg: msg.text and ("instagram.com" in msg.text.lower() or "pinterest.com" in msg.text.lower()))
 async def handle_media(msg: types.Message):
     url = msg.text.strip()
     media = download_media(url)
@@ -40,14 +43,14 @@ async def handle_media(msg: types.Message):
         await msg.reply("⚠️ Media topilmadi yoki post private bo‘lishi mumkin.")
         return
 
-    # Guruhda yoki shaxsiy chatda
+    # Guruh yoki shaxsiy chat
     if msg.chat.type in ["group", "supergroup"]:
         username = f"@{msg.from_user.username}" if msg.from_user.username else msg.from_user.full_name
         caption = f"{username} yuborgan media 🎥"
     else:
         caption = "Mana yuklab oling 👇"
 
-    # Media turlarini ketma-ket yuboramiz
+    # Media yuborish
     for item in media:
         try:
             if item["type"] == "video":
@@ -57,8 +60,9 @@ async def handle_media(msg: types.Message):
         except Exception as e:
             await msg.reply(f"❌ Media yuborishda xato: {e}")
 
-# --- HANDLER: 'deku' so‘ziga reaksiya ---
-@dp.message_handler(lambda msg: msg.text and msg.text.lower() in ["deku", "деку"])
+
+# --- HANDLER: "deku" so‘ziga javob ---
+@router.message(lambda msg: msg.text and msg.text.lower() in ["deku", "деку"])
 async def react_deku(msg: types.Message):
     try:
         await msg.reply("💚")
@@ -66,15 +70,24 @@ async def react_deku(msg: types.Message):
         pass
 
 
-# --- Flask route (Render jonli tutish uchun) ---
+# --- Flask route (Render uchun jonli tutish) ---
 @app.route('/')
 def home():
     return {"status": "ok", "message": "DEKU InstaPin bot ishlayapti"}
 
+
+# --- Asosiy ishga tushirish funksiyasi ---
+async def main():
+    print("🤖 Bot ishga tushmoqda...")
+    await dp.start_polling(bot)
+
+
 if __name__ == "__main__":
-    import threading
+    # Flask serverni parallel ravishda ishga tushuramiz
     def run_flask():
         app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
 
     threading.Thread(target=run_flask).start()
-    executor.start_polling(dp, skip_updates=True)
+
+    # Asosiy asyncio loopni ishga tushuramiz
+    asyncio.run(main())
