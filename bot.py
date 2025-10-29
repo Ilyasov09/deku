@@ -1,99 +1,80 @@
 import os
 import requests
-import telebot
-from telebot import types
-from flask import Flask
-from threading import Thread
+from aiogram import Bot, Dispatcher, types
+from aiogram.utils import executor
+from flask import Flask, request
 
-# 🔐 Tokenni Render environment'dan olamiz
-TOKEN = os.environ.get("BOT_TOKEN")
+# Telegram token (Render Environment Variables dan olinadi)
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+API_URL = os.getenv("API_URL", "https://api-xtsc.onrender.com/download")
+API_KEY = os.getenv("API_KEY")
 
-if not TOKEN:
-    raise ValueError("❌ BOT_TOKEN environment variable topilmadi! Render'da qo‘shishni unutmang.")
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher(bot)
 
-bot = telebot.TeleBot(TOKEN)
+# Flask app (Render uchun jonli tutish)
 app = Flask(__name__)
 
-# 💬 Flask jonli javobi (UptimeRobot uchun)
-@app.route('/')
-def home():
-    return "✅ DEKU bot ishlayapti!", 200
-
-
-# 🎬 Instagram videoni yuklab olish funksiyasi
-def get_instagram_video(insta_url):
+# --- FUNKSIYA: media yuklash ---
+def download_media(url):
+    headers = {"x-api-key": API_KEY}
+    params = {"url": url}
     try:
-        api_url = f"https://api.terrabox.tech/insta?url={insta_url}"
-        response = requests.get(api_url)
-        if response.status_code == 200:
-            data = response.json()
-            if data.get("url"):
-                return data["url"]
-        return None
+        res = requests.get(API_URL, headers=headers, params=params, timeout=25)
+        data = res.json()
+        if data.get("status") != "ok":
+            return None
+        return data.get("media", [])
     except Exception as e:
-        print("❌ API xato:", e)
+        print("API xato:", e)
         return None
 
 
-# 🚀 /start komandasi
-@bot.message_handler(commands=['start'])
-def start(message):
-    bot.reply_to(message,
-                 "👋 Salom! Men DEKU botman.\n"
-                 "Menga Instagram link yubor, men esa videoni yuboraman 🎥\n\n"
-                 "Guruhda ishlasam: foydalanuvchi video yuborsa, caption qo‘shaman 💚")
+# --- HANDLER: link yuborilgan ---
+@dp.message_handler(lambda msg: "instagram.com" in msg.text.lower() or "pinterest.com" in msg.text.lower())
+async def handle_media(msg: types.Message):
+    url = msg.text.strip()
+    media = download_media(url)
 
+    if not media:
+        await msg.reply("⚠️ Media topilmadi yoki post private bo‘lishi mumkin.")
+        return
 
-# 🎯 “deku” yoki “DEKU” so‘zlariga reaksiya
-@bot.message_handler(func=lambda msg: msg.text and msg.text.lower() in ["deku", "деку"])
-def react_to_deku(message):
-    try:
-        bot.set_message_reaction(chat_id=message.chat.id,
-                                 message_id=message.message_id,
-                                 reaction=[types.ReactionTypeEmoji("💚")])
-    except Exception as e:
-        print("Reaksiya qo‘shishda xato:", e)
-
-
-# 🧩 Asosiy xabar handler
-@bot.message_handler(func=lambda msg: True)
-def handle_message(message):
-    text = message.text.strip()
-
-    # Agar Instagram link bo‘lsa
-    if "instagram.com" in text:
-        video_url = get_instagram_video(text)
-        if video_url:
-            if message.chat.type in ["group", "supergroup"]:
-                caption = f"🎬 @{message.from_user.username or message.from_user.first_name} video yubordi!"
-                bot.reply_to(message, "⏬ Yuklanmoqda, biroz kuting...")
-                bot.send_video(message.chat.id, video=video_url, caption=caption)
-            else:
-                bot.send_message(message.chat.id, "⏬ Yuklanmoqda...")
-                bot.send_video(message.chat.id, video=video_url, caption="🎬 Mana siz so‘ragan video!")
-                # 💚 Reaksiya
-                try:
-                    bot.set_message_reaction(chat_id=message.chat.id,
-                                             message_id=message.message_id,
-                                             reaction=[types.ReactionTypeEmoji("💚")])
-                except Exception:
-                    pass
-        else:
-            bot.reply_to(message, "❌ Video yuklab bo‘lmadi. Iltimos, haqiqiy Instagram link yuboring.")
+    # Guruhda yoki shaxsiy chatda
+    if msg.chat.type in ["group", "supergroup"]:
+        username = f"@{msg.from_user.username}" if msg.from_user.username else msg.from_user.full_name
+        caption = f"{username} yuborgan media 🎥"
     else:
-        # Boshqa xabarlar uchun javob bermaslik
+        caption = "Mana yuklab oling 👇"
+
+    # Media turlarini ketma-ket yuboramiz
+    for item in media:
+        try:
+            if item["type"] == "video":
+                await msg.reply_video(item["url"], caption=caption)
+            elif item["type"] == "image":
+                await msg.reply_photo(item["url"], caption=caption)
+        except Exception as e:
+            await msg.reply(f"❌ Media yuborishda xato: {e}")
+
+# --- HANDLER: 'deku' so‘ziga reaksiya ---
+@dp.message_handler(lambda msg: msg.text and msg.text.lower() in ["deku", "деку"])
+async def react_deku(msg: types.Message):
+    try:
+        await msg.reply("💚")
+    except:
         pass
 
 
-# 🧵 Flask va botni birga ishga tushirish
-def run_flask():
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
-
-
-def run_bot():
-    bot.polling(none_stop=True)
-
+# --- Flask route (Render jonli tutish uchun) ---
+@app.route('/')
+def home():
+    return {"status": "ok", "message": "DEKU InstaPin bot ishlayapti"}
 
 if __name__ == "__main__":
-    Thread(target=run_flask).start()
-    Thread(target=run_bot).start()
+    import threading
+    def run_flask():
+        app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+
+    threading.Thread(target=run_flask).start()
+    executor.start_polling(dp, skip_updates=True)
