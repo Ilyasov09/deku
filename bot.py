@@ -1,101 +1,83 @@
 import os
 import requests
 from io import BytesIO
-from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message
-from aiogram.enums import ParseMode
-from aiogram.filters import CommandStart
-from aiogram.client.default import DefaultBotProperties
+import telebot
 from flask import Flask
 import threading
-import asyncio
 
-# --- 🔧 Config ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 API_KEY = os.getenv("API_KEY")
 API_URL = os.getenv("API_URL", "https://api-xtsc.onrender.com/download")
+PORT = int(os.getenv("PORT", 10000))
 
-bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-dp = Dispatcher()
+if not BOT_TOKEN:
+    raise SystemExit("❌ BOT_TOKEN topilmadi — Render environment variables ni tekshir!")
 
-# --- 🌐 Flask app (Render jonli tutish uchun) ---
+bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 app = Flask(__name__)
 
-@app.route('/')
+@app.route("/")
 def home():
-    return {"status": "ok", "message": "💚 DEKU InstaPin bot ishlayapti"}
+    return {"status": "ok", "message": "✅ Bot ishlayapti!"}
 
-# --- 📦 Media yuklash funksiyasi ---
 def download_media(url):
-    headers = {"x-api-key": API_KEY}
-    params = {"url": url}
+    headers = {"x-api-key": API_KEY} if API_KEY else {}
     try:
-        res = requests.get(API_URL, headers=headers, params=params, timeout=25)
-        data = res.json()
+        r = requests.get(API_URL, headers=headers, params={"url": url}, timeout=25)
+        r.raise_for_status()
+        data = r.json()
         if data.get("status") != "ok":
-            print("❌ API javobi xato:", data)
             return []
         return data.get("media", [])
     except Exception as e:
-        print("❌ API bilan bog'lanishda xato:", e)
+        print("API xato:", e)
         return []
 
-# --- 👋 /start komandasi ---
-@dp.message(CommandStart())
-async def start_handler(msg: Message):
-    name = msg.from_user.first_name or "do‘stim"
-    await msg.answer(
-        f"👋 Salom, <b>{name}</b>!\n\n"
-        "Men <b>Instagram</b> va <b>Pinterest</b> dan media yuklab bera olaman 📸🎥\n\n"
-        "Menga shunchaki post yoki reel linkini yuboring 👇"
-    )
+@bot.message_handler(commands=['start', 'help'])
+def start(msg):
+    bot.reply_to(msg, f"👋 Salom, <b>{msg.from_user.first_name}</b>!\nMenga Instagram yoki Pinterest link yubor — men media yuboraman 📥")
 
-# --- 🔗 Link yuborilganida ---
-@dp.message(F.text.regexp(r"https?://"))
-async def handle_link(msg: Message):
+@bot.message_handler(func=lambda m: m.text and m.text.startswith("http"))
+def handle_link(msg):
     url = msg.text.strip()
-
-    # Faqat Instagram yoki Pinterest
-    if not any(x in url for x in ["instagram.com", "pinterest.com"]):
-        await msg.answer("⚠️ Faqat Instagram yoki Pinterest linklarini yuboring.")
+    if "instagram.com" not in url and "pinterest.com" not in url:
+        bot.reply_to(msg, "⚠️ Faqat Instagram yoki Pinterest link yubor!")
         return
 
-    await msg.answer("🔍 Media yuklanmoqda, biroz kuting...")
+    loading = bot.reply_to(msg, "🔄 Yuklanmoqda...")
 
     media_list = download_media(url)
     if not media_list:
-        await msg.answer("❌ Media topilmadi yoki post private bo‘lishi mumkin.")
+        bot.edit_message_text("❌ Media topilmadi yoki post private.", chat_id=msg.chat.id, message_id=loading.message_id)
         return
 
     for item in media_list:
+        media_url = item.get("url", "").replace("&amp;", "&")
+        if not media_url:
+            continue
         try:
-            # &amp; belgilarni tozalaymiz
-            clean_url = item["url"].replace("&amp;", "&")
-
-            # Faylni yuklab olish
-            file_data = requests.get(clean_url, stream=True, timeout=30)
-            if file_data.status_code != 200:
-                await msg.answer("❌ Faylni yuklab bo‘lmadi (URL xato).")
+            res = requests.get(media_url, timeout=30)
+            if res.status_code != 200:
+                bot.send_message(msg.chat.id, "❌ Faylni yuklab bo‘lmadi.")
                 continue
 
-            file_bytes = BytesIO(file_data.content)
-            file_bytes.name = "media.mp4" if item["type"] == "video" else "image.jpg"
-
-            # Telegramga yuborish
-            if item["type"] == "video":
-                await msg.answer_video(video=file_bytes, caption="🎥 Video tayyor!")
-            elif item["type"] == "image":
-                await msg.answer_photo(photo=file_bytes, caption="🖼️ Rasm tayyor!")
-
+            file = BytesIO(res.content)
+            if item.get("type") == "video":
+                file.name = "video.mp4"
+                bot.send_video(msg.chat.id, video=file, caption="🎥 Video yuklandi ✅")
+            else:
+                file.name = "image.jpg"
+                bot.send_photo(msg.chat.id, photo=file, caption="🖼️ Rasm yuklandi ✅")
         except Exception as e:
-            await msg.answer(f"❌ Media yuborishda xato: {e}")
+            print("Yuborish xatosi:", e)
+            bot.send_message(msg.chat.id, "❌ Media yuborishda xato yuz berdi.")
 
-# --- 🧠 Flask serverni alohida oqimda ishga tushirish ---
 def run_flask():
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+    app.run(host="0.0.0.0", port=PORT)
 
-# --- 🚀 Ishga tushirish ---
+def run_bot():
+    bot.infinity_polling()
+
 if __name__ == "__main__":
-    print("🤖 Bot ishga tushmoqda...")
-    threading.Thread(target=run_flask).start()
-    asyncio.run(dp.start_polling(bot))
+    threading.Thread(target=run_flask, daemon=True).start()
+    run_bot()
